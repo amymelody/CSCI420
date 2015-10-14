@@ -16,8 +16,11 @@
 #include <GL/glu.h>
 #include <GL/glut.h>
 #include <vector>
+#include "vector3.h"
 
 using namespace std;
+
+const GLfloat MAX_LINE_LENGTH = 0.02;
 
 int g_vMousePos[2] = {0, 0};
 int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
@@ -33,27 +36,20 @@ float g_vLandRotate[3] = {0.0, 0.0, 0.0};
 float g_vLandTranslate[3] = {0.0, 0.0, 0.0};
 float g_vLandScale[3] = {1.0, 1.0, 1.0};
 
-/* Parallel vectors of vectors of vertices and colors for each spline. */
-vector<vector<struct vertex>> g_vVertices;
-vector<vector<struct color>> g_vColors;
+/* Parallel vectors of vectors of vertices, colors, and tangents for each spline. */
+vector<vector<vector3>> g_vVertices;
+vector<vector<vector3>> g_vColors;
+vector<vector<vector3>> g_vCenters;
+vector<vector<vector3>> g_vUps;
+
+int g_currentSpline = 0;
+int g_currentPointOnSpline = 0;
 
 /* represents one control point along the spline */
 struct point {
 	double x;
 	double y;
 	double z;
-};
-
-struct vertex {
-	GLfloat x;
-	GLfloat y;
-	GLfloat z;
-};
-
-struct color {
-	GLfloat r;
-	GLfloat g;
-	GLfloat b;
 };
 
 /* spline struct which contains how many control points, and an array of control points */
@@ -71,6 +67,7 @@ int g_iNumOfSplines;
 /* tension parameter (s) */
 GLfloat g_tension = 0.5;
 
+GLfloat** g_basisMatrix;
 
 /* Write a screenshot to the specified filename */
 void saveScreenshot (char *filename)
@@ -154,142 +151,189 @@ int loadSplines(char *argv) {
 	return 0;
 }
 
-GLfloat lineLengthSquared(struct vertex v0, struct vertex v1)
+void matMult(GLfloat** A, GLfloat** B, GLfloat** product, int mA, int nA, int nB)
 {
-	return (v1.x-v0.x)*(v1.x-v0.x) + 
-		(v1.y-v0.y)*(v1.y-v0.y) + 
-		(v1.z-v0.z)*(v1.z-v0.z);
-}
-
-struct vertex getPointOnSpline(int splineIndex, int controlPointIndex, GLfloat u)
-{
-	struct vertex v;
-
-	GLfloat* uVector = new GLfloat[4];
-	GLfloat** basis = new GLfloat*[4];
-	for (int i=0; i<4; i++)
-		basis[i] = new GLfloat[4];
-	GLfloat** control = new GLfloat*[4];
-	for (int i=0; i<4; i++)
-		control[i] = new GLfloat[3];
-	GLfloat** basisControl = new GLfloat*[4];
-	for (int i=0; i<4; i++)
-		basisControl[i] = new GLfloat[3];
-
-	// Fill in u vector
-	for (int i=0; i<4; i++)
-		uVector[i] = pow(u, 3 - i);
-
-	// Fill in basis batrix
-	basis[0][0] = -g_tension;
-	basis[0][1] = 2.0 - g_tension;
-	basis[0][2] = g_tension - 2.0;
-	basis[0][3] = g_tension;
-	basis[1][0] = 2.0 * g_tension;
-	basis[1][1] = g_tension - 3.0;
-	basis[1][2] = 3.0 - 2.0 * g_tension;
-	basis[1][3] = -g_tension;
-	basis[2][0] = -g_tension;
-	basis[2][1] = 0;
-	basis[2][2] = g_tension;
-	basis[2][3] = 0;
-	basis[3][0] = 0;
-	basis[3][1] = 1.0;
-	basis[3][2] = 0;
-	basis[3][3] = 0;
-
-	// Fill in control matrix
-	for (int i=0; i<4; i++)
+	for (int i=0; i<mA; i++)
 	{
-		control[i][0] = g_Splines[splineIndex].points[controlPointIndex + i].x;
-		control[i][1] = g_Splines[splineIndex].points[controlPointIndex + i].y;
-		control[i][2] = g_Splines[splineIndex].points[controlPointIndex + i].z;
+		for (int j=0; j<nB; j++)
+			product[i][j] = 0;
 	}
 
-	// Fill in basis * control matrix
-	for (int i=0; i<4; i++)
+	for (int i=0; i<mA; i++)
 	{
-		for (int j=0; j<3; j++)
+		for (int j=0; j<nB; j++)
 		{
-			basisControl[i][j] = basis[i][0] * control[0][j] +
-				basis[i][1] * control[1][j] +
-				basis[i][2] * control[2][j] +
-				basis[i][3] * control[3][j];
+			for (int k=0; k<nA; k++)
+			{
+				product[i][j] += A[i][k]*B[k][j];
+			}
 		}
 	}
+}
 
-	// uVector * basisControl
-	v.x = uVector[0] * basisControl[0][0] +
-		uVector[1] * basisControl[1][0] +
-		uVector[2] * basisControl[2][0] +
-		uVector[3] * basisControl[3][0];
-	v.y = uVector[0] * basisControl[0][1] +
-		uVector[1] * basisControl[1][1] +
-		uVector[2] * basisControl[2][1] +
-		uVector[3] * basisControl[3][1];
-	v.z = uVector[0] * basisControl[0][2] +
-		uVector[1] * basisControl[1][2] +
-		uVector[2] * basisControl[2][2] +
-		uVector[3] * basisControl[3][2];
-
-	delete[] uVector;
+vector3 controlPointToSpline(vector3 splineVector, int splineIndex, int controlPointIndex, GLfloat u, bool isDerivative)
+{
+	// Initialize matrices
+	GLfloat** uVector = new GLfloat*[1];
+	uVector[0] = new GLfloat[4];
+	GLfloat** vVector = new GLfloat*[1];
+	vVector[0] = new GLfloat[3];
+	GLfloat** controlMatrix = new GLfloat*[4];
 	for (int i=0; i<4; i++)
-		delete[] basis[i];
-	delete[] basis;
-	for (int i=0; i<3; i++)
-		delete[] control[i];
-	delete[] control;
-	for (int i=0; i<3; i++)
-		delete[] basisControl[i];
-	delete[] basisControl;
+		controlMatrix[i] = new GLfloat[3];
+	GLfloat** basisControlMatrix = new GLfloat*[4];
+	for (int i=0; i<4; i++)
+		basisControlMatrix[i] = new GLfloat[3];
 
-	return v;
+	// Fill in matrices
+	if (isDerivative)
+	{
+		for (int i=0; i<3; i++)
+			uVector[0][i] = (3-i)*pow(u, 2-i);
+		uVector[0][3] = 0;
+	}
+	else
+	{
+		for (int i=0; i<4; i++)
+			uVector[0][i] = pow(u, 3-i);
+	}
+	for (int i=0; i<4; i++)
+	{
+		controlMatrix[i][0] = g_Splines[splineIndex].points[controlPointIndex + i].x;
+		controlMatrix[i][1] = g_Splines[splineIndex].points[controlPointIndex + i].y;
+		controlMatrix[i][2] = g_Splines[splineIndex].points[controlPointIndex + i].z;
+	}
+	matMult(g_basisMatrix, controlMatrix, basisControlMatrix, 4, 4, 3);
+	matMult(uVector, basisControlMatrix, vVector, 1, 4, 3);
+
+	// Fill in spline vector
+	splineVector.x = vVector[0][0];
+	splineVector.y = vVector[0][1];
+	splineVector.z = vVector[0][2];
+
+	// Deallocate matrices
+	for (int i=0; i<4; i++)
+		delete[] basisControlMatrix[i];
+	delete[] basisControlMatrix;
+	for (int i=0; i<4; i++)
+		delete[] controlMatrix[i];
+	delete[] controlMatrix;
+	delete[] vVector[0];
+	delete[] vVector;
+	delete[] uVector[0];
+	delete[] uVector;
+
+	return splineVector;
+}
+
+void computeLookAt(int splineIndex, int controlPointIndex, GLfloat u)
+{
+	vector3 tangent = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u, true);
+	tangent.normalize();
+	g_vCenters[splineIndex].push_back(g_vVertices[splineIndex].back() + tangent);
+
+	vector3 n;
+	if (g_vVertices[splineIndex].size() == 1)
+	{
+		// If this is the first up vector we are computing, we need to pick an arbitrary vector
+		vector3 v(1.0, 0, 0);
+		n = crossProduct(tangent, v);
+	}
+	else
+	{
+		// Otherwise compute the new N using the previous up vector
+		n = crossProduct(g_vUps[splineIndex].back(), tangent);
+	}
+	n.normalize();
+	vector3 up = crossProduct(tangent, n);
+	up.normalize();
+	g_vUps[splineIndex].push_back(up);
 }
 
 void subdivide(int splineIndex, int controlPointIndex, GLfloat u0, GLfloat u1, GLfloat maxLineLength)
 {
-	GLfloat uMid = (u0 + u1) / 2.0;
-	struct vertex v0 = getPointOnSpline(splineIndex, controlPointIndex, u0);
-	struct vertex v1 = getPointOnSpline(splineIndex, controlPointIndex, u1);
+	vector3 v0 = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u0, false);
+	vector3 v1 = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u1, false);
+
 	if (lineLengthSquared(v0, v1) > maxLineLength*maxLineLength)
 	{
+		GLfloat uMid = (u0 + u1) / 2.0;
 		subdivide(splineIndex, controlPointIndex, u0, uMid, maxLineLength);
 		subdivide(splineIndex, controlPointIndex, uMid, u1, maxLineLength);
 	}
 	else
 	{
-		struct color vertColor;
-		vertColor.r = 1.0;
-		vertColor.g = 0;
-		vertColor.b = 0;
+		vector3 vertColor;
+		vertColor.x = 1.0;
+		vertColor.y = 0;
+		vertColor.z = 0;
 		if (g_vVertices[splineIndex].empty() || g_vVertices[splineIndex].back().x != v0.x ||
 			g_vVertices[splineIndex].back().y != v0.y || g_vVertices[splineIndex].back().z != v0.z)
 		{
 			// Don't repeat vertices
 			g_vVertices[splineIndex].push_back(v0);
 			g_vColors[splineIndex].push_back(vertColor);
+			computeLookAt(splineIndex, controlPointIndex, u0);
 		}
 		g_vVertices[splineIndex].push_back(v1);
 		g_vColors[splineIndex].push_back(vertColor);
+		computeLookAt(splineIndex, controlPointIndex, u1);
 	}
+}
+
+void doIdle()
+{
+  /* do some stuff... */
+
+  /* make the screen update */
+  glutPostRedisplay();
 }
 
 void myinit()
 {
-	g_vLandTranslate[2] = -50.0;
+
+	/* Fill in the basis matrix */
+	g_basisMatrix = new GLfloat*[4];
+	for (int i=0; i<4; i++)
+		g_basisMatrix[i] = new GLfloat[4];
+	g_basisMatrix[0][0] = -g_tension;
+	g_basisMatrix[0][1] = 2.0 - g_tension;
+	g_basisMatrix[0][2] = g_tension - 2.0;
+	g_basisMatrix[0][3] = g_tension;
+	g_basisMatrix[1][0] = 2.0 * g_tension;
+	g_basisMatrix[1][1] = g_tension - 3.0;
+	g_basisMatrix[1][2] = 3.0 - 2.0 * g_tension;
+	g_basisMatrix[1][3] = -g_tension;
+	g_basisMatrix[2][0] = -g_tension;
+	g_basisMatrix[2][1] = 0;
+	g_basisMatrix[2][2] = g_tension;
+	g_basisMatrix[2][3] = 0;
+	g_basisMatrix[3][0] = 0;
+	g_basisMatrix[3][1] = 1.0;
+	g_basisMatrix[3][2] = 0;
+	g_basisMatrix[3][3] = 0;
 
 	/* Fill in the parallel vectors of vertices and colors from spline info */
 	for (int i=0; i<g_iNumOfSplines; i++)
 	{
-		g_vVertices.push_back(vector<struct vertex>());
-		g_vColors.push_back(vector<struct color>());
+		g_vVertices.push_back(vector<vector3>());
+		g_vColors.push_back(vector<vector3>());
+		g_vCenters.push_back(vector<vector3>());
+		g_vUps.push_back(vector<vector3>());
 		for (int j=0; j<g_Splines[i].numControlPoints-3; j++)
 		{
-			subdivide(i, j, 0.0, 1.0, 0.01);
+			subdivide(i, j, 0.0, 1.0, MAX_LINE_LENGTH);
 		}
 	}
 
   glClearColor(0.0, 0.0, 0.0, 0.0);
+}
+
+void mycleanup()
+{
+	for (int i=0; i<4; i++)
+		delete[] g_basisMatrix[i];
+	delete[] g_basisMatrix;
 }
 
 void drawSplines()
@@ -299,7 +343,7 @@ void drawSplines()
 		glBegin(GL_LINE_STRIP);
 		for (int j=0; j<g_vVertices[i].size(); j++)
 		{
-			glColor3f(g_vColors[i][j].r, g_vColors[i][j].g, g_vColors[i][j].b);
+			glColor3f(g_vColors[i][j].x, g_vColors[i][j].y, g_vColors[i][j].z);
 			glVertex3f(g_vVertices[i][j].x, g_vVertices[i][j].y, g_vVertices[i][j].z);
 		}
 		glEnd();
@@ -319,9 +363,40 @@ void display()
 	glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
 	glRotatef(g_vLandRotate[2], 0.0, 0.0, 1.0);
 	glScalef(g_vLandScale[0], g_vLandScale[1], g_vLandScale[2]);
+	
+	gluLookAt(g_vVertices[g_currentSpline][g_currentPointOnSpline].x, 
+		g_vVertices[g_currentSpline][g_currentPointOnSpline].y, 
+		g_vVertices[g_currentSpline][g_currentPointOnSpline].z,
+		g_vCenters[g_currentSpline][g_currentPointOnSpline].x,
+		g_vCenters[g_currentSpline][g_currentPointOnSpline].y,
+		g_vCenters[g_currentSpline][g_currentPointOnSpline].z,
+		g_vUps[g_currentSpline][g_currentPointOnSpline].x,
+		g_vUps[g_currentSpline][g_currentPointOnSpline].y,
+		g_vUps[g_currentSpline][g_currentPointOnSpline].z);
+
+	g_currentPointOnSpline++;
+	if (g_currentPointOnSpline >= g_vVertices[g_currentSpline].size())
+	{
+		g_currentPointOnSpline = 0;
+		g_currentSpline++;
+		if (g_currentSpline >= g_vVertices.size())
+			g_currentSpline = 0;
+	}
 
 	// Draw splines here
 	drawSplines();
+
+	// TEMP
+	glBegin(GL_POLYGON);
+		glColor3f(0, 1.0, 0);
+		glVertex3f(30.0, 80.0, 20.0);
+		glColor3f(0, 1.0, 0);
+		glVertex3f(30.0, 80.0, -20.0);
+		glColor3f(0, 1.0, 0);
+		glVertex3f(30.0, -20.0, -20.0);
+		glColor3f(0, 1.0, 0);
+		glVertex3f(30.0, -20.0, 20.0);
+	glEnd();
 
   glutSwapBuffers();
 }
@@ -334,14 +409,6 @@ void menufunc(int value)
       exit(0);
       break;
   }
-}
-
-void doIdle()
-{
-  /* do some stuff... */
-
-  /* make the screen update */
-  glutPostRedisplay();
 }
 
 /* converts mouse drags into information about 
@@ -510,6 +577,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	glEnable(GL_DEPTH_TEST);
 
 	glutMainLoop();
+
+	mycleanup();
 
 	return 0;
 }

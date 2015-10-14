@@ -86,6 +86,7 @@
     <ClInclude Include="picLibrary\pic.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="vector3.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="assign2.cpp" />
