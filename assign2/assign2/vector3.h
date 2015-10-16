@@ -30,11 +30,22 @@ struct vector3 {
 
 	vector3 operator+(const vector3& rhs)
 	{
-		vector3 result;
-		result.x = this->x + rhs.x;
-		result.y = this->y + rhs.y;
-		result.z = this->z + rhs.z;
-		return result;
+		return vector3(this->x+rhs.x, this->y+rhs.y, this->z+rhs.z);
+	}
+
+	vector3 operator-(const vector3& rhs)
+	{
+		return vector3(this->x-rhs.x, this->y-rhs.y, this->z-rhs.z);
+	}
+
+	vector3 operator-()
+	{
+		return vector3(-this->x, -this->y, -this->z);
+	}
+
+	vector3 operator*(GLfloat rhs)
+	{
+		return vector3(this->x*rhs, this->y*rhs, this->z*rhs);
 	}
 };
 
@@ -48,9 +59,9 @@ GLfloat lineLengthSquared(vector3 v0, vector3 v1)
 vector3 crossProduct(vector3 A, vector3 B)
 {
 	vector3 product;
-	product.x = A.y*B.z + A.z*B.y;
-	product.y = A.z*B.x + A.x*B.z;
-	product.z = A.x*B.y + B.y*A.x;
+	product.x = A.y*B.z - A.z*B.y;
+	product.y = A.z*B.x - A.x*B.z;
+	product.z = A.x*B.y - A.y*B.x;
 	return product;
 }
 

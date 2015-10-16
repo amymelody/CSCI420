@@ -21,6 +21,10 @@
 using namespace std;
 
 const GLfloat MAX_LINE_LENGTH = 0.02;
+const GLfloat BOX_SIZE = 60.0;
+const GLfloat RAIL_SIZE = 0.2;
+const GLfloat DEBUG_Z_OFFSET = -5.0;
+const int SPEED = 2;
 
 int g_vMousePos[2] = {0, 0};
 int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
@@ -36,14 +40,28 @@ float g_vLandRotate[3] = {0.0, 0.0, 0.0};
 float g_vLandTranslate[3] = {0.0, 0.0, 0.0};
 float g_vLandScale[3] = {1.0, 1.0, 1.0};
 
-/* Parallel vectors of vectors of vertices, colors, and tangents for each spline. */
+/* Parallel vectors of vectors of vertices, center vectors, and up vectors for each spline. */
 vector<vector<vector3>> g_vVertices;
-vector<vector<vector3>> g_vColors;
 vector<vector<vector3>> g_vCenters;
 vector<vector<vector3>> g_vUps;
 
+/* Rail vertices */
+vector<vector<vector3>> g_vRailVertices;
+
+/* Color of the rail */
+vector3 g_railColor = vector3(1.0, 0.0, 0.0);
+
+/* Keep track of which spline we are on and how far along it we are */
 int g_currentSpline = 0;
 int g_currentPointOnSpline = 0;
+
+/* Texture */
+GLuint* g_texture;
+
+/* tension parameter (s) */
+GLfloat g_tension = 0.5;
+
+GLfloat** g_basisMatrix;
 
 /* represents one control point along the spline */
 struct point {
@@ -63,11 +81,6 @@ struct spline *g_Splines;
 
 /* total number of splines */
 int g_iNumOfSplines;
-
-/* tension parameter (s) */
-GLfloat g_tension = 0.5;
-
-GLfloat** g_basisMatrix;
 
 /* Write a screenshot to the specified filename */
 void saveScreenshot (char *filename)
@@ -226,13 +239,15 @@ vector3 controlPointToSpline(vector3 splineVector, int splineIndex, int controlP
 	return splineVector;
 }
 
-void computeLookAt(int splineIndex, int controlPointIndex, GLfloat u)
+void computeLookAtAndRailVerts(int splineIndex, int controlPointIndex, GLfloat u)
 {
-	vector3 tangent = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u, true);
-	tangent.normalize();
-	g_vCenters[splineIndex].push_back(g_vVertices[splineIndex].back() + tangent);
+	vector3 centerVert, tangent, n, up;
+	centerVert = g_vVertices[splineIndex].back();
 
-	vector3 n;
+	tangent = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u, true);
+	tangent.normalize();
+	g_vCenters[splineIndex].push_back(centerVert + tangent);
+
 	if (g_vVertices[splineIndex].size() == 1)
 	{
 		// If this is the first up vector we are computing, we need to pick an arbitrary vector
@@ -245,9 +260,16 @@ void computeLookAt(int splineIndex, int controlPointIndex, GLfloat u)
 		n = crossProduct(g_vUps[splineIndex].back(), tangent);
 	}
 	n.normalize();
-	vector3 up = crossProduct(tangent, n);
+
+	up = crossProduct(tangent, n);
 	up.normalize();
 	g_vUps[splineIndex].push_back(up);
+
+	// Precompute vertices for rail based on local coordinate system
+	g_vRailVertices[splineIndex].push_back(centerVert + ((n - up) * RAIL_SIZE));
+	g_vRailVertices[splineIndex].push_back(centerVert + ((n + up) * RAIL_SIZE));
+	g_vRailVertices[splineIndex].push_back(centerVert + ((-n + up) * RAIL_SIZE));
+	g_vRailVertices[splineIndex].push_back(centerVert + ((-n - up) * RAIL_SIZE));
 }
 
 void subdivide(int splineIndex, int controlPointIndex, GLfloat u0, GLfloat u1, GLfloat maxLineLength)
@@ -263,21 +285,15 @@ void subdivide(int splineIndex, int controlPointIndex, GLfloat u0, GLfloat u1, G
 	}
 	else
 	{
-		vector3 vertColor;
-		vertColor.x = 1.0;
-		vertColor.y = 0;
-		vertColor.z = 0;
 		if (g_vVertices[splineIndex].empty() || g_vVertices[splineIndex].back().x != v0.x ||
 			g_vVertices[splineIndex].back().y != v0.y || g_vVertices[splineIndex].back().z != v0.z)
 		{
 			// Don't repeat vertices
 			g_vVertices[splineIndex].push_back(v0);
-			g_vColors[splineIndex].push_back(vertColor);
-			computeLookAt(splineIndex, controlPointIndex, u0);
+			computeLookAtAndRailVerts(splineIndex, controlPointIndex, u0);
 		}
 		g_vVertices[splineIndex].push_back(v1);
-		g_vColors[splineIndex].push_back(vertColor);
-		computeLookAt(splineIndex, controlPointIndex, u1);
+		computeLookAtAndRailVerts(splineIndex, controlPointIndex, u1);
 	}
 }
 
@@ -289,8 +305,22 @@ void doIdle()
   glutPostRedisplay();
 }
 
-void myinit()
+void texload(int i, char* filename)
 {
+	Pic* img;
+	img = jpeg_read(filename, NULL);
+	glBindTexture(GL_TEXTURE_2D, g_texture[i]);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img->nx, img->ny, 
+		0, GL_RGB, GL_UNSIGNED_BYTE, &img->pix[0]);
+	pic_free(img);
+}
+
+void myinit(char* argv)
+{
+	/* Load texture */
+	g_texture = new GLuint[1];
+	glGenTextures(1, g_texture);
+	texload(0, argv);
 
 	/* Fill in the basis matrix */
 	g_basisMatrix = new GLfloat*[4];
@@ -313,13 +343,13 @@ void myinit()
 	g_basisMatrix[3][2] = 0;
 	g_basisMatrix[3][3] = 0;
 
-	/* Fill in the parallel vectors of vertices and colors from spline info */
+	/* Fill in the parallel vectors of vertices from spline info */
 	for (int i=0; i<g_iNumOfSplines; i++)
 	{
 		g_vVertices.push_back(vector<vector3>());
-		g_vColors.push_back(vector<vector3>());
 		g_vCenters.push_back(vector<vector3>());
 		g_vUps.push_back(vector<vector3>());
+		g_vRailVertices.push_back(vector<vector3>());
 		for (int j=0; j<g_Splines[i].numControlPoints-3; j++)
 		{
 			subdivide(i, j, 0.0, 1.0, MAX_LINE_LENGTH);
@@ -338,16 +368,133 @@ void mycleanup()
 
 void drawSplines()
 {
+	// Draw the rail
 	for (int i=0; i<g_iNumOfSplines; i++)
 	{
-		glBegin(GL_LINE_STRIP);
-		for (int j=0; j<g_vVertices[i].size(); j++)
+		if (g_vVertices[i].size() >= 1)
 		{
-			glColor3f(g_vColors[i][j].x, g_vColors[i][j].y, g_vColors[i][j].z);
-			glVertex3f(g_vVertices[i][j].x, g_vVertices[i][j].y, g_vVertices[i][j].z);
+			glBegin(GL_POLYGON);
+				glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
+				glVertex3f(g_vRailVertices[i][0].x, g_vRailVertices[i][0].y, g_vRailVertices[i][0].z);
+				glVertex3f(g_vRailVertices[i][1].x, g_vRailVertices[i][1].y, g_vRailVertices[i][1].z);
+				glVertex3f(g_vRailVertices[i][2].x, g_vRailVertices[i][2].y, g_vRailVertices[i][2].z);
+				glVertex3f(g_vRailVertices[i][3].x, g_vRailVertices[i][3].y, g_vRailVertices[i][3].z);
+			glEnd();
+			for (int j=4; j<g_vRailVertices[i].size(); j+=4)
+			{
+				glBegin(GL_POLYGON);
+					glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
+					glVertex3f(g_vRailVertices[i][j].x, g_vRailVertices[i][j].y, g_vRailVertices[i][j].z);
+					glVertex3f(g_vRailVertices[i][j+1].x, g_vRailVertices[i][j+1].y, g_vRailVertices[i][j+1].z);
+					glVertex3f(g_vRailVertices[i][j+2].x, g_vRailVertices[i][j+2].y, g_vRailVertices[i][j+2].z);
+					glVertex3f(g_vRailVertices[i][j+3].x, g_vRailVertices[i][j+3].y, g_vRailVertices[i][j+3].z);
+				glEnd();
+			}
+			
+			glBegin(GL_LINE_STRIP);
+			for (int j=0; j<g_vVertices[i].size(); j++)
+			{
+				glColor3f(0.0, 1.0, 0.0);
+				glVertex3f(g_vVertices[i][j].x, g_vVertices[i][j].y, g_vVertices[i][j].z);
+			}
+			glEnd();
+			/*
+			glBegin(GL_LINE_STRIP);
+			for (int j=0; j<g_vCenters[i].size(); j++)
+			{
+				glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
+				glVertex3f(g_vCenters[i][j].x, g_vCenters[i][j].y, g_vCenters[i][j].z);
+			}
+			glEnd();
+
+			glBegin(GL_LINE_STRIP);
+			for (int j=0; j<g_vCenters[i].size(); j++)
+			{
+				glColor3f(0.0, 0.0, 1.0);
+				glVertex3f(g_vVertices[i][j].x + g_vUps[i][j].x, g_vVertices[i][j].y + g_vUps[i][j].y, g_vVertices[i][j].z + g_vUps[i][j].z);
+			}
+			glEnd();*/
 		}
-		glEnd();
 	}
+}
+
+void drawSkybox()
+{
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, g_texture[0]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	//Right
+	glBegin(GL_POLYGON);
+		glColor3f(1.0, 1.0, 1.0);
+		glTexCoord2f(1.0, 0.25);
+		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.25);
+		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.5);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0, 0.5);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+	glEnd();
+	//Left
+	glBegin(GL_POLYGON);
+		glTexCoord2f(0.0, 0.25);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.25);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.5);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(0.0, 0.5);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+	glEnd();
+	//Back
+	glBegin(GL_POLYGON);
+		glTexCoord2f(2.0/3.0, 1.0);
+		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 1.0);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.75);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.75);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+	glEnd();
+	//Forward
+	glBegin(GL_POLYGON);
+		glTexCoord2f(2.0/3.0, 0.25);
+		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.25);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.5);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.5);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+	glEnd();
+	//Top
+	glBegin(GL_POLYGON);
+		glTexCoord2f(2.0/3.0, 0.0);
+		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.25);
+		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.25);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.0);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
+	glEnd();
+	//Bottom
+	glBegin(GL_POLYGON);
+		glTexCoord2f(2.0/3.0, 0.75);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(2.0/3.0, 0.5);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.5);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1.0/3.0, 0.75);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+	glEnd();
+
+	glDisable(GL_TEXTURE_2D);
 }
 
 void display()
@@ -358,6 +505,7 @@ void display()
 	// Scale, Rotate, and Translate
 	glLoadIdentity();
 	
+	//g_vLandTranslate[2] = DEBUG_Z_OFFSET;
 	glTranslatef(g_vLandTranslate[0], g_vLandTranslate[1], g_vLandTranslate[2]);
 	glRotatef(g_vLandRotate[0], 1.0, 0.0, 0.0);
 	glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
@@ -374,7 +522,7 @@ void display()
 		g_vUps[g_currentSpline][g_currentPointOnSpline].y,
 		g_vUps[g_currentSpline][g_currentPointOnSpline].z);
 
-	g_currentPointOnSpline++;
+	g_currentPointOnSpline += SPEED;
 	if (g_currentPointOnSpline >= g_vVertices[g_currentSpline].size())
 	{
 		g_currentPointOnSpline = 0;
@@ -383,20 +531,9 @@ void display()
 			g_currentSpline = 0;
 	}
 
-	// Draw splines here
+	drawSkybox();
 	drawSplines();
 
-	// TEMP
-	glBegin(GL_POLYGON);
-		glColor3f(0, 1.0, 0);
-		glVertex3f(30.0, 80.0, 20.0);
-		glColor3f(0, 1.0, 0);
-		glVertex3f(30.0, 80.0, -20.0);
-		glColor3f(0, 1.0, 0);
-		glVertex3f(30.0, -20.0, -20.0);
-		glColor3f(0, 1.0, 0);
-		glVertex3f(30.0, -20.0, 20.0);
-	glEnd();
 
   glutSwapBuffers();
 }
@@ -496,6 +633,24 @@ void mousebutton(int button, int state, int x, int y)
   g_vMousePos[1] = y;
 }
 
+void keyboard(unsigned char key, int x, int y)
+{
+	switch(key)
+	{
+		case 'v':
+			glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+			break;
+		case 'w':
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			break;
+		case 's':
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+			break;
+		default:
+			break;
+	}
+}
+
 void reshape(int w, int h)
 {
 	GLfloat aspect = (GLfloat) w / (GLfloat) h;
@@ -528,9 +683,9 @@ int _tmain(int argc, _TCHAR* argv[])
 	// right click "assign1", choose "Properties",
 	// go to "Configuration Properties", click "Debugging",
 	// then type your track file name for the "Command Arguments"
-	if (argc<2)
+	if (argc<3)
 	{  
-		printf ("usage: %s <trackfile>\n", argv[0]);
+		printf ("usage: %s <trackfile> <skybox texture>\n", argv[0]);
 		exit(0);
 	}
 
@@ -562,6 +717,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	glutPassiveMotionFunc(mouseidle);
 	/* callback for mouse button changes */
 	glutMouseFunc(mousebutton);
+	/* callback for keyboard input */
+	glutKeyboardFunc(keyboard);
 
 	/* reshape callback */
 	glutReshapeFunc(reshape);
@@ -572,7 +729,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	//glutTimerFunc(1000 / 15, timer, 0);
 
 	/* do initialization */
-	myinit();
+	myinit(argv[2]);
 
 	glEnable(GL_DEPTH_TEST);
 
