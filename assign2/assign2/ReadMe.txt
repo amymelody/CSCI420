@@ -1,40 +1,37 @@
-========================================================================
-    CONSOLE APPLICATION : assign2 Project Overview
-========================================================================
+Amy DiGiovanni
+Assignment 2
 
-AppWizard has created this assign2 application for you.
+The program usage is:
+assign2 <trackfile> <skybox top texture> <skybox bottom texture> <skybox left texture> 
+<skybox right texture> <skybox front texture> <skybox back texture>
 
-This file contains a summary of what you will find in each of the files that
-make up your assign2 application.
+Spline Rendering:
+	For this part of the assignment, I used the recursive
+	subdivision algorithm. The step size is inversely proportional
+	to the number of control points. This is to ensure that performance
+	does not suffer for larger splines, and that the coaster doesn't
+	go too fast for smaller splines.
+	If multiple splines are used as input, the program will render
+	each one in the same space.
+Ground and Sky:
+	To create the environment, I used a space skybox. The "ground" is the bottom of
+	the skybox.
+The Ride:
+	To get a continuous camera orientation, I used an arbitrary
+	vector to compute a local coordinate system for the first point,
+	then computed each subsequent coordinate system based on the previous.
+	After reaching the end of a spline, the program jumps to the next
+	one if there is one, otherwise it goes back to the beginning of
+	the first spline.
+Cross-Section:
+	The cross-section uses the local coordinate system from the 
+	previous part to create two rails on either side of the spline.
 
+Controls:
+	v - switch to vertex rendering mode for track
+	w - switch to wireframe rendering mode for track
+	s - switch to solid rendering mode for track
+	u - increase speed
+	j - decrease speed (cannot go below 0)
 
-assign2.vcxproj
-    This is the main project file for VC++ projects generated using an Application Wizard.
-    It contains information about the version of Visual C++ that generated the file, and
-    information about the platforms, configurations, and project features selected with the
-    Application Wizard.
-
-assign2.vcxproj.filters
-    This is the filters file for VC++ projects generated using an Application Wizard. 
-    It contains information about the association between the files in your project 
-    and the filters. This association is used in the IDE to show grouping of files with
-    similar extensions under a specific node (for e.g. ".cpp" files are associated with the
-    "Source Files" filter).
-
-assign2.cpp
-    This is the main application source file.
-
-/////////////////////////////////////////////////////////////////////////////
-Other standard files:
-
-StdAfx.h, StdAfx.cpp
-    These files are used to build a precompiled header (PCH) file
-    named assign2.pch and a precompiled types file named StdAfx.obj.
-
-/////////////////////////////////////////////////////////////////////////////
-Other notes:
-
-AppWizard uses "TODO:" comments to indicate parts of the source code you
-should add to or customize.
-
-/////////////////////////////////////////////////////////////////////////////
+The animation is a sequence of .jpg's named "000.jpg" to "312.jpg".

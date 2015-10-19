@@ -20,43 +20,35 @@
 
 using namespace std;
 
-const GLfloat MAX_LINE_LENGTH = 0.02;
 const GLfloat BOX_SIZE = 60.0;
-const GLfloat RAIL_SIZE = 0.2;
-const GLfloat DEBUG_Z_OFFSET = -5.0;
-const int SPEED = 2;
+const GLfloat RAIL_SIZE = 0.1;
+const GLfloat DISTANCE_BETWEEN_RAILS = 0.6;
+const GLfloat CAMERA_OFFSET = 0.4;
 
-int g_vMousePos[2] = {0, 0};
-int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
-int g_iMiddleMouseButton = 0;
-int g_iRightMouseButton = 0;
+int g_speed = 4;
 
-typedef enum { ROTATE, TRANSLATE, SCALE } CONTROLSTATE;
+/* keep track of the current polygon mode (this is because when we render the environment we always want it to be GL_FILL) */
+GLenum g_currentPolygonMode = GL_FILL;
 
-CONTROLSTATE g_ControlState = ROTATE;
-
-/* state of the world */
-float g_vLandRotate[3] = {0.0, 0.0, 0.0};
-float g_vLandTranslate[3] = {0.0, 0.0, 0.0};
-float g_vLandScale[3] = {1.0, 1.0, 1.0};
-
-/* Parallel vectors of vectors of vertices, center vectors, and up vectors for each spline. */
+/* Parallel vectors of vectors of vertices, eye vectors, center vectors, and up vectors for each spline. */
 vector<vector<vector3>> g_vVertices;
+vector<vector<vector3>> g_vEyes;
 vector<vector<vector3>> g_vCenters;
 vector<vector<vector3>> g_vUps;
 
 /* Rail vertices */
-vector<vector<vector3>> g_vRailVertices;
+vector<vector<vector3>> g_vLeftRailVertices;
+vector<vector<vector3>> g_vRightRailVertices;
 
 /* Color of the rail */
-vector3 g_railColor = vector3(1.0, 0.0, 0.0);
+vector3 g_railColor = vector3(0.0, 1.0, 1.0);
 
 /* Keep track of which spline we are on and how far along it we are */
 int g_currentSpline = 0;
 int g_currentPointOnSpline = 0;
 
 /* Texture */
-GLuint* g_texture;
+GLuint* g_textures;
 
 /* tension parameter (s) */
 GLfloat g_tension = 0.5;
@@ -241,17 +233,14 @@ vector3 controlPointToSpline(vector3 splineVector, int splineIndex, int controlP
 
 void computeLookAtAndRailVerts(int splineIndex, int controlPointIndex, GLfloat u)
 {
-	vector3 centerVert, tangent, n, up;
-	centerVert = g_vVertices[splineIndex].back();
-
-	tangent = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u, true);
+	vector3 tangent = controlPointToSpline(vector3(), splineIndex, controlPointIndex, u, true);
 	tangent.normalize();
-	g_vCenters[splineIndex].push_back(centerVert + tangent);
 
+	vector3 n;
 	if (g_vVertices[splineIndex].size() == 1)
 	{
 		// If this is the first up vector we are computing, we need to pick an arbitrary vector
-		vector3 v(1.0, 0, 0);
+		vector3 v(0, 1.0, 0);
 		n = crossProduct(tangent, v);
 	}
 	else
@@ -261,15 +250,26 @@ void computeLookAtAndRailVerts(int splineIndex, int controlPointIndex, GLfloat u
 	}
 	n.normalize();
 
-	up = crossProduct(tangent, n);
+	vector3 up = crossProduct(tangent, n);
 	up.normalize();
+
+	vector3 eye = g_vVertices[splineIndex].back() + up * CAMERA_OFFSET;
+
+	g_vEyes[splineIndex].push_back(eye);
+	g_vCenters[splineIndex].push_back(eye + tangent);
 	g_vUps[splineIndex].push_back(up);
 
-	// Precompute vertices for rail based on local coordinate system
-	g_vRailVertices[splineIndex].push_back(centerVert + ((n - up) * RAIL_SIZE));
-	g_vRailVertices[splineIndex].push_back(centerVert + ((n + up) * RAIL_SIZE));
-	g_vRailVertices[splineIndex].push_back(centerVert + ((-n + up) * RAIL_SIZE));
-	g_vRailVertices[splineIndex].push_back(centerVert + ((-n - up) * RAIL_SIZE));
+	// Precompute vertices for rails based on local coordinate system
+	vector3 leftCenterVert = g_vVertices[splineIndex].back() + n * (DISTANCE_BETWEEN_RAILS/2.0);
+	vector3 rightCenterVert = g_vVertices[splineIndex].back() - n * (DISTANCE_BETWEEN_RAILS/2.0);
+	g_vLeftRailVertices[splineIndex].push_back(leftCenterVert + ((n + up) * RAIL_SIZE)); //Top left
+	g_vLeftRailVertices[splineIndex].push_back(leftCenterVert + ((-n + up) * RAIL_SIZE)); //Top right
+	g_vLeftRailVertices[splineIndex].push_back(leftCenterVert + ((-n - up) * RAIL_SIZE)); //Bottom right
+	g_vLeftRailVertices[splineIndex].push_back(leftCenterVert + ((n - up) * RAIL_SIZE)); //Bottom left
+	g_vRightRailVertices[splineIndex].push_back(rightCenterVert + ((n + up) * RAIL_SIZE)); //Top left
+	g_vRightRailVertices[splineIndex].push_back(rightCenterVert + ((-n + up) * RAIL_SIZE)); //Top right
+	g_vRightRailVertices[splineIndex].push_back(rightCenterVert + ((-n - up) * RAIL_SIZE)); //Bottom right
+	g_vRightRailVertices[splineIndex].push_back(rightCenterVert + ((n - up) * RAIL_SIZE)); //Bottom left
 }
 
 void subdivide(int splineIndex, int controlPointIndex, GLfloat u0, GLfloat u1, GLfloat maxLineLength)
@@ -309,18 +309,19 @@ void texload(int i, char* filename)
 {
 	Pic* img;
 	img = jpeg_read(filename, NULL);
-	glBindTexture(GL_TEXTURE_2D, g_texture[i]);
+	glBindTexture(GL_TEXTURE_2D, g_textures[i]);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img->nx, img->ny, 
 		0, GL_RGB, GL_UNSIGNED_BYTE, &img->pix[0]);
 	pic_free(img);
 }
 
-void myinit(char* argv)
+void myinit(_TCHAR* argv[])
 {
-	/* Load texture */
-	g_texture = new GLuint[1];
-	glGenTextures(1, g_texture);
-	texload(0, argv);
+	/* Load textures */
+	g_textures = new GLuint[6];
+	glGenTextures(6, g_textures);
+	for (int i=0; i<6; i++)
+		texload(i, argv[i+2]);
 
 	/* Fill in the basis matrix */
 	g_basisMatrix = new GLfloat*[4];
@@ -347,12 +348,14 @@ void myinit(char* argv)
 	for (int i=0; i<g_iNumOfSplines; i++)
 	{
 		g_vVertices.push_back(vector<vector3>());
+		g_vEyes.push_back(vector<vector3>());
 		g_vCenters.push_back(vector<vector3>());
 		g_vUps.push_back(vector<vector3>());
-		g_vRailVertices.push_back(vector<vector3>());
+		g_vLeftRailVertices.push_back(vector<vector3>());
+		g_vRightRailVertices.push_back(vector<vector3>());
 		for (int j=0; j<g_Splines[i].numControlPoints-3; j++)
 		{
-			subdivide(i, j, 0.0, 1.0, MAX_LINE_LENGTH);
+			subdivide(i, j, 0.0, 1.0, (GLfloat)g_Splines[i].numControlPoints / 500);
 		}
 	}
 
@@ -366,135 +369,153 @@ void mycleanup()
 	delete[] g_basisMatrix;
 }
 
-void drawSplines()
+void drawRail(vector<vector<vector3>> railVertices)
 {
 	// Draw the rail
 	for (int i=0; i<g_iNumOfSplines; i++)
 	{
 		if (g_vVertices[i].size() >= 1)
 		{
+			// First face
 			glBegin(GL_POLYGON);
 				glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
-				glVertex3f(g_vRailVertices[i][0].x, g_vRailVertices[i][0].y, g_vRailVertices[i][0].z);
-				glVertex3f(g_vRailVertices[i][1].x, g_vRailVertices[i][1].y, g_vRailVertices[i][1].z);
-				glVertex3f(g_vRailVertices[i][2].x, g_vRailVertices[i][2].y, g_vRailVertices[i][2].z);
-				glVertex3f(g_vRailVertices[i][3].x, g_vRailVertices[i][3].y, g_vRailVertices[i][3].z);
+				glVertex3f(railVertices[i][0].x, railVertices[i][0].y, railVertices[i][0].z);
+				glVertex3f(railVertices[i][1].x, railVertices[i][1].y, railVertices[i][1].z);
+				glVertex3f(railVertices[i][2].x, railVertices[i][2].y, railVertices[i][2].z);
+				glVertex3f(railVertices[i][3].x, railVertices[i][3].y, railVertices[i][3].z);
 			glEnd();
-			for (int j=4; j<g_vRailVertices[i].size(); j+=4)
+			// Each subsequent set of 4 coplanar vertices has triangles connecting them with the previous ones
+			for (int j=4; j<railVertices[i].size(); j+=4)
 			{
-				glBegin(GL_POLYGON);
+				glBegin(GL_TRIANGLE_STRIP);
 					glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
-					glVertex3f(g_vRailVertices[i][j].x, g_vRailVertices[i][j].y, g_vRailVertices[i][j].z);
-					glVertex3f(g_vRailVertices[i][j+1].x, g_vRailVertices[i][j+1].y, g_vRailVertices[i][j+1].z);
-					glVertex3f(g_vRailVertices[i][j+2].x, g_vRailVertices[i][j+2].y, g_vRailVertices[i][j+2].z);
-					glVertex3f(g_vRailVertices[i][j+3].x, g_vRailVertices[i][j+3].y, g_vRailVertices[i][j+3].z);
+					// Top
+					glVertex3f(railVertices[i][j].x, railVertices[i][j].y, railVertices[i][j].z);
+					glVertex3f(railVertices[i][j-4].x, railVertices[i][j-4].y, railVertices[i][j-4].z);
+					glVertex3f(railVertices[i][j+1].x, railVertices[i][j+1].y, railVertices[i][j+1].z);
+					glVertex3f(railVertices[i][j-3].x, railVertices[i][j-3].y, railVertices[i][j-3].z);
+					// Right
+					glVertex3f(railVertices[i][j+2].x, railVertices[i][j+2].y, railVertices[i][j+2].z);
+					glVertex3f(railVertices[i][j-2].x, railVertices[i][j-2].y, railVertices[i][j-2].z);
+					// Bottom
+					glVertex3f(railVertices[i][j+3].x, railVertices[i][j+3].y, railVertices[i][j+3].z);
+					glVertex3f(railVertices[i][j-1].x, railVertices[i][j-1].y, railVertices[i][j-1].z);
+					// Left
+					glVertex3f(railVertices[i][j].x, railVertices[i][j].y, railVertices[i][j].z);
+					glVertex3f(railVertices[i][j-4].x, railVertices[i][j-4].y, railVertices[i][j-4].z);
 				glEnd();
 			}
-			
-			glBegin(GL_LINE_STRIP);
-			for (int j=0; j<g_vVertices[i].size(); j++)
-			{
-				glColor3f(0.0, 1.0, 0.0);
-				glVertex3f(g_vVertices[i][j].x, g_vVertices[i][j].y, g_vVertices[i][j].z);
-			}
-			glEnd();
-			/*
-			glBegin(GL_LINE_STRIP);
-			for (int j=0; j<g_vCenters[i].size(); j++)
-			{
+			// Last face
+			glBegin(GL_POLYGON);
 				glColor3f(g_railColor.x, g_railColor.y, g_railColor.z);
-				glVertex3f(g_vCenters[i][j].x, g_vCenters[i][j].y, g_vCenters[i][j].z);
-			}
+				glVertex3f(railVertices[i][railVertices[i].size()-4].x, railVertices[i][railVertices[i].size()-4].y, railVertices[i][railVertices[i].size()-4].z);
+				glVertex3f(railVertices[i][railVertices[i].size()-3].x, railVertices[i][railVertices[i].size()-3].y, railVertices[i][railVertices[i].size()-3].z);
+				glVertex3f(railVertices[i][railVertices[i].size()-2].x, railVertices[i][railVertices[i].size()-2].y, railVertices[i][railVertices[i].size()-2].z);
+				glVertex3f(railVertices[i][railVertices[i].size()-1].x, railVertices[i][railVertices[i].size()-1].y, railVertices[i][railVertices[i].size()-1].z);
 			glEnd();
-
-			glBegin(GL_LINE_STRIP);
-			for (int j=0; j<g_vCenters[i].size(); j++)
-			{
-				glColor3f(0.0, 0.0, 1.0);
-				glVertex3f(g_vVertices[i][j].x + g_vUps[i][j].x, g_vVertices[i][j].y + g_vUps[i][j].y, g_vVertices[i][j].z + g_vUps[i][j].z);
-			}
-			glEnd();*/
 		}
 	}
 }
 
 void drawSkybox()
 {
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	glEnable(GL_TEXTURE_2D);
-	glBindTexture(GL_TEXTURE_2D, g_texture[0]);
+	
+	//Top
+	glBindTexture(GL_TEXTURE_2D, g_textures[0]);
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	//Right
 	glBegin(GL_POLYGON);
 		glColor3f(1.0, 1.0, 1.0);
-		glTexCoord2f(1.0, 0.25);
-		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.25);
-		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.5);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0, 0.5);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
-	glEnd();
-	//Left
-	glBegin(GL_POLYGON);
-		glTexCoord2f(0.0, 0.25);
+		glTexCoord2f(0, 0);
 		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.25);
+		glTexCoord2f(0, 1);
 		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.5);
-		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(0.0, 0.5);
-		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
-	glEnd();
-	//Back
-	glBegin(GL_POLYGON);
-		glTexCoord2f(2.0/3.0, 1.0);
-		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 1.0);
-		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.75);
-		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.75);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
-	glEnd();
-	//Forward
-	glBegin(GL_POLYGON);
-		glTexCoord2f(2.0/3.0, 0.25);
+		glTexCoord2f(1, 1);
 		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.25);
-		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.5);
-		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.5);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-	glEnd();
-	//Top
-	glBegin(GL_POLYGON);
-		glTexCoord2f(2.0/3.0, 0.0);
+		glTexCoord2f(1, 0);
 		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.25);
-		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.25);
-		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.0);
-		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
 	glEnd();
 	//Bottom
+	glBindTexture(GL_TEXTURE_2D, g_textures[1]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glBegin(GL_POLYGON);
-		glTexCoord2f(2.0/3.0, 0.75);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
-		glTexCoord2f(2.0/3.0, 0.5);
-		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.5);
+		glTexCoord2f(0, 0);
 		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
-		glTexCoord2f(1.0/3.0, 0.75);
+		glTexCoord2f(0, 1);
 		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 1);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 0);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+	glEnd();
+	//Left
+	glBindTexture(GL_TEXTURE_2D, g_textures[2]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBegin(GL_POLYGON);
+		glTexCoord2f(0, 0);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(0, 1);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 1);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1, 0);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+	glEnd();
+	//Right
+	glBindTexture(GL_TEXTURE_2D, g_textures[3]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBegin(GL_POLYGON);
+		glTexCoord2f(0, 0);
+		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(0, 1);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1, 1);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 0);
+		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+	glEnd();
+	//Front
+	glBindTexture(GL_TEXTURE_2D, g_textures[4]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBegin(GL_POLYGON);
+		glTexCoord2f(0, 0);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(0, 1);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1, 1);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, -BOX_SIZE);
+		glTexCoord2f(1, 0);
+		glVertex3f(BOX_SIZE, BOX_SIZE, -BOX_SIZE);
+	glEnd();
+	//Back
+	glBindTexture(GL_TEXTURE_2D, g_textures[5]);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glBegin(GL_POLYGON);
+		glTexCoord2f(0, 0);
+		glVertex3f(-BOX_SIZE, -BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(0, 1);
+		glVertex3f(-BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 1);
+		glVertex3f(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+		glTexCoord2f(1, 0);
+		glVertex3f(BOX_SIZE, -BOX_SIZE, BOX_SIZE);
 	glEnd();
 
 	glDisable(GL_TEXTURE_2D);
+	glPolygonMode(GL_FRONT_AND_BACK, g_currentPolygonMode);
 }
 
 void display()
@@ -505,24 +526,18 @@ void display()
 	// Scale, Rotate, and Translate
 	glLoadIdentity();
 	
-	//g_vLandTranslate[2] = DEBUG_Z_OFFSET;
-	glTranslatef(g_vLandTranslate[0], g_vLandTranslate[1], g_vLandTranslate[2]);
-	glRotatef(g_vLandRotate[0], 1.0, 0.0, 0.0);
-	glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
-	glRotatef(g_vLandRotate[2], 0.0, 0.0, 1.0);
-	glScalef(g_vLandScale[0], g_vLandScale[1], g_vLandScale[2]);
-	
-	gluLookAt(g_vVertices[g_currentSpline][g_currentPointOnSpline].x, 
-		g_vVertices[g_currentSpline][g_currentPointOnSpline].y, 
-		g_vVertices[g_currentSpline][g_currentPointOnSpline].z,
+	gluLookAt(g_vEyes[g_currentSpline][g_currentPointOnSpline].x, 
+		g_vEyes[g_currentSpline][g_currentPointOnSpline].y, 
+		g_vEyes[g_currentSpline][g_currentPointOnSpline].z,
 		g_vCenters[g_currentSpline][g_currentPointOnSpline].x,
 		g_vCenters[g_currentSpline][g_currentPointOnSpline].y,
 		g_vCenters[g_currentSpline][g_currentPointOnSpline].z,
 		g_vUps[g_currentSpline][g_currentPointOnSpline].x,
 		g_vUps[g_currentSpline][g_currentPointOnSpline].y,
 		g_vUps[g_currentSpline][g_currentPointOnSpline].z);
-
-	g_currentPointOnSpline += SPEED;
+		
+	// Advance the roller coaster
+	g_currentPointOnSpline += g_speed;
 	if (g_currentPointOnSpline >= g_vVertices[g_currentSpline].size())
 	{
 		g_currentPointOnSpline = 0;
@@ -532,8 +547,8 @@ void display()
 	}
 
 	drawSkybox();
-	drawSplines();
-
+	drawRail(g_vLeftRailVertices);
+	drawRail(g_vRightRailVertices);
 
   glutSwapBuffers();
 }
@@ -548,103 +563,28 @@ void menufunc(int value)
   }
 }
 
-/* converts mouse drags into information about 
-rotation/translation/scaling */
-void mousedrag(int x, int y)
-{
-  int vMouseDelta[2] = {x-g_vMousePos[0], y-g_vMousePos[1]};
-  
-  switch (g_ControlState)
-  {
-    case TRANSLATE:  
-      if (g_iLeftMouseButton)
-      {
-        g_vLandTranslate[0] += vMouseDelta[0]*0.01;
-        g_vLandTranslate[1] -= vMouseDelta[1]*0.01;
-      }
-      if (g_iMiddleMouseButton)
-      {
-        g_vLandTranslate[2] += vMouseDelta[1]*0.01;
-      }
-      break;
-    case ROTATE:
-      if (g_iLeftMouseButton)
-      {
-        g_vLandRotate[0] += vMouseDelta[1];
-        g_vLandRotate[1] += vMouseDelta[0];
-      }
-      if (g_iMiddleMouseButton)
-      {
-        g_vLandRotate[2] += vMouseDelta[1];
-      }
-      break;
-    case SCALE:
-      if (g_iLeftMouseButton)
-      {
-        g_vLandScale[0] *= 1.0+vMouseDelta[0]*0.01;
-        g_vLandScale[1] *= 1.0-vMouseDelta[1]*0.01;
-      }
-      if (g_iMiddleMouseButton)
-      {
-        g_vLandScale[2] *= 1.0-vMouseDelta[1]*0.01;
-      }
-      break;
-  }
-  g_vMousePos[0] = x;
-  g_vMousePos[1] = y;
-}
-
-void mouseidle(int x, int y)
-{
-  g_vMousePos[0] = x;
-  g_vMousePos[1] = y;
-}
-
-void mousebutton(int button, int state, int x, int y)
-{
-
-  switch (button)
-  {
-    case GLUT_LEFT_BUTTON:
-      g_iLeftMouseButton = (state==GLUT_DOWN);
-      break;
-    case GLUT_MIDDLE_BUTTON:
-      g_iMiddleMouseButton = (state==GLUT_DOWN);
-      break;
-    case GLUT_RIGHT_BUTTON:
-      g_iRightMouseButton = (state==GLUT_DOWN);
-      break;
-  }
- 
-  switch(glutGetModifiers())
-  {
-    case GLUT_ACTIVE_CTRL:
-      g_ControlState = TRANSLATE;
-      break;
-    case GLUT_ACTIVE_SHIFT:
-      g_ControlState = SCALE;
-      break;
-    default:
-      g_ControlState = ROTATE;
-      break;
-  }
-
-  g_vMousePos[0] = x;
-  g_vMousePos[1] = y;
-}
-
 void keyboard(unsigned char key, int x, int y)
 {
 	switch(key)
 	{
 		case 'v':
+			g_currentPolygonMode = GL_POINT;
 			glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
 			break;
 		case 'w':
+			g_currentPolygonMode = GL_LINE;
 			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 			break;
 		case 's':
+			g_currentPolygonMode = GL_FILL;
 			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+			break;
+		case 'u':
+			g_speed++;
+			break;
+		case 'j':
+			if (g_speed > 0)
+				g_speed--;
 			break;
 		default:
 			break;
@@ -673,7 +613,8 @@ void timer(int value)
 	char fileName[2048];
 	sprintf(fileName, "%03d.jpg", value);
 	saveScreenshot(fileName);
-	glutTimerFunc(1000 / 15, timer, value+1);
+	if (value < 999)
+		glutTimerFunc(1000 / 15, timer, value+1);
 }
 
 int _tmain(int argc, _TCHAR* argv[])
@@ -683,9 +624,9 @@ int _tmain(int argc, _TCHAR* argv[])
 	// right click "assign1", choose "Properties",
 	// go to "Configuration Properties", click "Debugging",
 	// then type your track file name for the "Command Arguments"
-	if (argc<3)
+	if (argc<8)
 	{  
-		printf ("usage: %s <trackfile> <skybox texture>\n", argv[0]);
+		printf ("usage: %s <trackfile> <skybox top texture> <skybox bottom texture> <skybox left texture> <skybox right texture> <skybox front texture> <skybox back texture>\n", argv[0]);
 		exit(0);
 	}
 
@@ -711,12 +652,6 @@ int _tmain(int argc, _TCHAR* argv[])
 	/* callback for animation */
 	glutIdleFunc(doIdle);
 
-	/* callback for mouse drags */
-	glutMotionFunc(mousedrag);
-	/* callback for idle mouse movement */
-	glutPassiveMotionFunc(mouseidle);
-	/* callback for mouse button changes */
-	glutMouseFunc(mousebutton);
 	/* callback for keyboard input */
 	glutKeyboardFunc(keyboard);
 
@@ -729,7 +664,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	//glutTimerFunc(1000 / 15, timer, 0);
 
 	/* do initialization */
-	myinit(argv[2]);
+	myinit(argv);
 
 	glEnable(GL_DEPTH_TEST);
 

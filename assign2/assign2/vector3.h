@@ -3,6 +3,7 @@
 #ifndef VECTOR3_H
 #define VECTOR3_H
 
+/* struct of vector with 3 components */
 struct vector3 {
 	GLfloat x;
 	GLfloat y;
