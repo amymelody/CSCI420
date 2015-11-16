@@ -5,14 +5,19 @@ Assignment 3 Raytracer
 Name: <Your name here>
 */
 
+#define _USE_MATH_DEFINES
+
 #include <pic.h>
 #include <windows.h>
 #include <stdlib.h>
 #include <GL/glu.h>
 #include <GL/glut.h>
+#include "vector3.h"
 
 #include <stdio.h>
 #include <string>
+#include <cmath>
+#include <float.h>
 
 #define MAX_TRIANGLES 2000
 #define MAX_SPHERES 10
@@ -26,11 +31,13 @@ char *filename=0;
 int mode=MODE_DISPLAY;
 
 //you may want to make these smaller for debugging purposes
-#define WIDTH 640
-#define HEIGHT 480
+#define WIDTH 320 //Change to 640 later
+#define HEIGHT 240 //Change to 480 later
 
 //the field of view of the camera
 #define fov 60.0
+
+using namespace std;
 
 unsigned char buffer[HEIGHT][WIDTH][3];
 
@@ -76,22 +83,146 @@ void plot_pixel_display(int x,int y,unsigned char r,unsigned char g,unsigned cha
 void plot_pixel_jpeg(int x,int y,unsigned char r,unsigned char g,unsigned char b);
 void plot_pixel(int x,int y,unsigned char r,unsigned char g,unsigned char b);
 
+double checkSphereIntersection(vector3 start, vector3 direction)
+{
+	double minT = DBL_MAX;
+
+	for (int i=0; i<num_spheres; i++)
+	{
+		double b = 2.0 * (direction.x*(start.x-spheres[i].position[0]) +
+			direction.y*(start.y-spheres[i].position[1]) +
+			direction.z*(start.z-spheres[i].position[2]));
+		double c = (start.x-spheres[i].position[0]) * (start.x-spheres[i].position[0]) +
+			(start.y-spheres[i].position[1]) * (start.y-spheres[i].position[1]) +
+			(start.z-spheres[i].position[2]) * (start.z-spheres[i].position[2])
+			- spheres[i].radius * spheres[i].radius;
+		
+		double discriminant = b*b - 4*c;
+		if (discriminant >= 0)
+		{
+			double t0 = (-b - sqrt(discriminant))/2.0;
+			double t1 = (-b + sqrt(discriminant))/2.0;
+			if (t0 > 0 && t0 < minT)
+				minT = t0;
+			else if (t1 > 0 && t1 < minT)
+				minT = t1;
+		}
+	}
+
+	if (minT == DBL_MAX)
+		minT = -1.0;
+
+	return minT;
+}
+
+double checkTriangleIntersection(vector3 start, vector3 direction)
+{
+	double minT = DBL_MAX;
+
+	for (int i=0; i<num_triangles; i++)
+	{
+		//Ray-plane intersection:
+		//Ray: r(t) = r0 + dt
+		//Plane: p dot n = p0 dot n  (where p0 is any arbitrary point on the plane)
+		//Intersection: (r0 + dt) dot n = p0 dot n
+		// => t = ((p0 dot n) - (r0 dot n)) / (d dot n)
+		vector3 a(triangles[i].v[0].position[0],
+			triangles[i].v[0].position[1],
+			triangles[i].v[0].position[2]);
+		vector3 b(triangles[i].v[1].position[0],
+			triangles[i].v[1].position[1],
+			triangles[i].v[1].position[2]);
+		vector3 c(triangles[i].v[2].position[0],
+			triangles[i].v[2].position[1],
+			triangles[i].v[2].position[2]);
+		vector3 n = crossProduct(b-a, c-a);
+
+		double dDotN = dotProduct(direction, n);
+		if (dDotN != 0)
+		{
+			double t = (dotProduct(a, n)-dotProduct(start, n)) / dDotN;
+			if (t > 0 && t < minT)
+			{
+				//To check if point P lies in triangle ABC:
+				//Take cross products (B-A)x(P-A), (C-B)x(P-B), (A-C)x(P-C)
+				//If they all point in the same direction relative to the plane,
+				//then P lies inside triangle ABC.
+				vector3 p = start + direction * t;
+				vector3 crossA = crossProduct(b-a, p-a);
+				vector3 crossB = crossProduct(c-b, p-b);
+				vector3 crossC = crossProduct(a-c, p-c);
+				if (dotProduct(crossA, crossB) > 0 && dotProduct(crossA, crossC) > 0)
+				{
+					//They all point in the same direction, so P is inside the triangle!
+					minT = t;
+				}
+			}
+		}
+	}
+
+	if (minT == DBL_MAX)
+		minT = -1.0;
+
+	return minT;
+}
+
 //MODIFY THIS FUNCTION
 void draw_scene()
 {
-  unsigned int x,y;
-  //simple output
-  for(x=0; x<WIDTH; x++)
-  {
-    glPointSize(2.0);  
-    glBegin(GL_POINTS);
-    for(y=0;y < HEIGHT;y++)
-    {
-      plot_pixel(x,y,x%256,y%256,(x+y)%256);
-    }
-    glEnd();
-    glFlush();
-  }
+	//camera position (0,0,0)
+	//look at (0,0,-1)
+	//up vector (0,1,0)
+	//near plane: z=-1
+	//fov: 60 degrees
+	//a = aspect ratio = w/h
+
+	//send out one ray for each pixel
+	double aspectRatio = (double)WIDTH / (double)HEIGHT;
+	double xMin = -aspectRatio * tan((fov/2) * M_PI / 180.0);
+	double xMax = aspectRatio * tan((fov/2) * M_PI / 180.0);
+	double yMin = -tan((fov/2) * M_PI / 180.0);
+	double yMax = tan((fov/2) * M_PI / 180.0);
+
+	unsigned int x,y;
+	double currentX = xMin;
+
+	for (x=0; x<WIDTH; x++)
+	{
+		double currentY = yMin;
+		glPointSize(2.0);  
+		glBegin(GL_POINTS);
+		for (y=0; y<HEIGHT; y++)
+		{
+			vector3 direction(currentX, currentY, -1);
+			direction.normalize();
+			double t;
+			double sphereT = checkSphereIntersection(vector3(0, 0, 0), direction);
+			double triangleT = checkTriangleIntersection(vector3(0, 0, 0), direction);
+			vector3 color(0,0,0);
+
+			if ((sphereT > 0 && sphereT < triangleT) || triangleT <= 0) 
+			{
+				t = sphereT;
+				color.x = 255;
+			} 
+			else 
+			{
+				t = triangleT;
+				color.y = 255;
+			}
+			
+			if (t > 0)
+				plot_pixel(x,y,color.x,color.y,color.z);
+			else
+				plot_pixel(x,y,255,255,255);
+			
+			currentY += (yMax-yMin)/(double)(HEIGHT-1);
+		}
+		glEnd();
+		glFlush();
+		currentX += (xMax-xMin)/(double)(WIDTH-1);
+	}
+
   printf("Done!\n"); fflush(stdout);
 }
 
